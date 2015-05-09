@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 import logging
+import theano
 from argparse import ArgumentParser
 
 from theano import tensor
@@ -37,13 +38,15 @@ def _meanize(data):
 
 
 def main(save_to, num_epochs):
-    dim = 1000
-    filtering = SparseFilter(dim=dim, input_dim=784, activation=Identity(),
+    dim = 400
+    n_steps = 100
+    batch_size = 100
+    filtering = SparseFilter(dim=dim, input_dim=784, batch_size=batch_size, n_steps=n_steps,
                              weights_init=IsotropicGaussian(.01), biases_init=Constant(0.))
     filtering.initialize()
-    causes = VarianceComponent(dim=dim, input_dim=dim, activation=Identity(),
+    causes = VarianceComponent(dim=9, input_dim=dim, n_steps=n_steps, batch_size=batch_size,
                                layer_below=filtering,
-                               weights_init=Uniform(.02, .001),
+                               weights_init=IsotropicGaussian(.01),  # Uniform(.1, .001),
                                use_bias=False)
     causes.initialize()
     clf = MLP([Sigmoid(), Softmax()], [dim, dim, 10],
@@ -53,21 +56,26 @@ def main(save_to, num_epochs):
     x = tensor.matrix('features')
     y = tensor.lmatrix('targets')
 
-    cost1 = filtering.cost(inputs=x, batch_size=100) + 0*y.sum()
-    cost2, z = causes.cost(inputs=x, batch_size=100)
-    cost = cost1 + cost2
+    cost1, code_1, rec_1 = filtering.cost(inputs=x, prior=0)
+    cost2, code_2, rec_2 = causes.cost(prev_code=code_1, prior=0)
+    cost1, code_1, rec_1 = filtering.cost(inputs=x, prior=0,
+                                          gamma=theano.gradient.disconnected_grad(rec_2))
+    cost2, code_2, rec_2 = causes.cost(prev_code=code_1, prior=0)
+    cost = cost1 + cost2 + 0*y.sum()
 
-    probs = clf.apply(z)
+    probs = clf.apply(code_1)
     nll = CategoricalCrossEntropy().apply(y.flatten(), probs)
     clf_error_rate = MisclassificationRate().apply(y.flatten(), probs)
     cost += nll
     cost.name = 'final_cost'
     cg = ComputationGraph([cost, clf_error_rate])
-    # new_cg = ComputationGraph([cost])
-    new_cg = batch_normalize(clf.linear_transformations, cg)
+    new_cg = cg
+    # new_cg = batch_normalize(clf.linear_transformations, cg)
 
-    mnist_train = MNIST("train")
+    mnist_train = MNIST("train", stop=50000)
+    mnist_valid = MNIST("train", start=50000, stop=60000)
     mnist_test = MNIST("test")
+
     trainstream = Mapping(DataStream(mnist_train,
                           iteration_scheme=SequentialScheme(
                               mnist_train.num_examples, 100)),
@@ -76,6 +84,10 @@ def main(save_to, num_epochs):
                          iteration_scheme=SequentialScheme(
                              mnist_test.num_examples, 100)),
                          _meanize)
+    validstream = Mapping(DataStream(mnist_valid,
+                          iteration_scheme=SequentialScheme(
+                              mnist_test.num_examples, 100)),
+                          _meanize)
 
     algorithm = GradientDescent(
         cost=new_cg.outputs[0], params=new_cg.parameters,
@@ -83,7 +95,6 @@ def main(save_to, num_epochs):
     main_loop = MainLoop(
         algorithm,
         trainstream,
-        model=Model(cost),
         extensions=[Timing(),
                     FinishAfter(after_n_epochs=num_epochs),
                     DataStreamMonitoring(
@@ -92,7 +103,7 @@ def main(save_to, num_epochs):
                         prefix="test"),
                     DataStreamMonitoringAndSaving(
                     new_cg.outputs,
-                    teststream,
+                    validstream,
                     [filtering, causes, clf],
                     'best_'+save_to+'.pkl',
                     cost_name='error_rate',
@@ -103,12 +114,12 @@ def main(save_to, num_epochs):
                         new_cg.outputs,
                         prefix="train",
                         after_epoch=True),
-                    Plot(
-                        'Sparse-Coding',
-                        channels=[
-                            ['test_final_cost',
-                             'test_misclassificationrate_apply_error_rate'],
-                            ['train_total_gradient_norm']]),
+                    # Plot(
+                    #     save_to,
+                    #     channels=[
+                    #         ['test_final_cost',
+                    #          'test_misclassificationrate_apply_error_rate'],
+                    #         ['train_total_gradient_norm']]),
                     Printing()])
     main_loop.run()
 

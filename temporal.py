@@ -3,9 +3,10 @@
 import logging
 import numpy as np
 import theano
-from argparse import ArgumentParser
 
+from argparse import ArgumentParser
 from theano import tensor
+from skimage.transform import rotate
 
 from blocks.algorithms import GradientDescent, Adam
 from blocks.initialization import IsotropicGaussian, Constant
@@ -22,7 +23,7 @@ from blocks.extensions.monitoring import (DataStreamMonitoring,
 from blocks.extensions.plot import Plot
 from blocks.main_loop import MainLoop
 
-from blocks_contrib.bricks.filtering import SparseFilter
+from blocks_contrib.bricks.filtering import TemporalSparseFilter, SparseFilter
 from blocks_contrib.extensions import DataStreamMonitoringAndSaving
 floatX = theano.config.floatX
 
@@ -39,24 +40,38 @@ def _add_enumerator(n_steps, batch_size):
     return func
 
 
-def _meanize(data):
-    newfirst = data[0] - means[None, :]
-    return (newfirst, data[1])
+def allrotations(image, N):
+    angles = np.linspace(0, 350, N)
+    R = np.zeros((N, 784))
+    for i in xrange(N):
+        img = rotate(image, angles[i])
+        R[i] = img.flatten()
+    return R
+
+
+def _meanize(n_steps):
+    def func(data):
+        newfirst = data[0] - means[None, :]
+        Rval = np.zeros((n_steps, newfirst.shape[0], newfirst.shape[1]))
+        for i, sample in enumerate(newfirst):
+            Rval[:, i, :] = allrotations(sample.reshape((28, 28)), n_steps)
+        # Rval = newfirst[np.newaxis].repeat(n_steps, axis=0)
+        Rval = Rval.astype(floatX)
+        return (Rval, data[1])
+    return func
 
 
 def main(save_to, num_epochs):
     dim = 500
     n_steps = 20
-    filtering = SparseFilter(dim=dim, input_dim=784, batch_size=100, n_steps=20,
-                             weights_init=IsotropicGaussian(.01), biases_init=Constant(0.))
+    proto = SparseFilter(dim=dim, input_dim=784, batch_size=100, n_steps=n_steps)
+    filtering = TemporalSparseFilter(proto=proto, dim=dim, n_steps=n_steps, batch_size=100,
+                                     weights_init=IsotropicGaussian(.01))
     filtering.initialize()
-    x = tensor.matrix('features')
+    x = tensor.tensor3('features')
     y = tensor.lmatrix('targets')
 
-    z = filtering.apply(inputs=x, batch_size=100, n_steps=n_steps,
-                        gamma=.1)[1][-1]
-    prior = theano.gradient.disconnected_grad(z)
-    cost, codes, recs = filtering.cost(inputs=x, prior=prior)
+    cost, z, x_hat = filtering.cost(inputs=x, gamma=.1)
     cost += 0*y.sum()
 
     cg = ComputationGraph([cost])
@@ -66,13 +81,11 @@ def main(save_to, num_epochs):
     mnist_test = MNIST("test")
     trainstream = Mapping(DataStream(mnist_train,
                           iteration_scheme=SequentialScheme(mnist_train.num_examples, 100)),
-                          _meanize)
+                          _meanize(n_steps))
     teststream = Mapping(DataStream(mnist_test,
                                     iteration_scheme=SequentialScheme(mnist_test.num_examples,
                                                                       100)),
-                         _meanize)
-    # trainstream = Mapping(trainstream, _add_enumerator(100, 100), add_sources=('enumerator', ))
-    # teststream = Mapping(teststream, _add_enumerator(100, 100), add_sources=('enumerator', ))
+                         _meanize(n_steps))
 
     algorithm = GradientDescent(
         cost=cost, params=cg.parameters,

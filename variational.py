@@ -7,8 +7,9 @@ from argparse import ArgumentParser
 
 from theano import tensor
 
+from blocks.bricks import MLP, Tanh, Identity
 from blocks.algorithms import GradientDescent, Adam
-from blocks.initialization import IsotropicGaussian, Constant
+from blocks.initialization import IsotropicGaussian
 from fuel.streams import DataStream
 from fuel.datasets import MNIST
 from fuel.schemes import SequentialScheme
@@ -22,8 +23,9 @@ from blocks.extensions.monitoring import (DataStreamMonitoring,
 from blocks.extensions.plot import Plot
 from blocks.main_loop import MainLoop
 
-from blocks_contrib.bricks.filtering import SparseFilter
+from blocks_contrib.bricks.filtering import VariationalSparseFilter
 from blocks_contrib.extensions import DataStreamMonitoringAndSaving
+from blocks_contrib.utils import _add_noise
 floatX = theano.config.floatX
 
 
@@ -45,18 +47,22 @@ def _meanize(data):
 
 
 def main(save_to, num_epochs):
+    rfunc = np.random.laplace
     dim = 500
     n_steps = 20
-    filtering = SparseFilter(dim=dim, input_dim=784, batch_size=100, n_steps=20,
-                             weights_init=IsotropicGaussian(.01), biases_init=Constant(0.))
+    batch_size = 100
+    mlp = MLP([Identity()], [dim, 784], use_bias=False)
+    filtering = VariationalSparseFilter(mlp=mlp, dim=dim, input_dim=784, batch_size=batch_size, n_steps=n_steps,
+                                        weights_init=IsotropicGaussian(.01))
     filtering.initialize()
     x = tensor.matrix('features')
     y = tensor.lmatrix('targets')
+    e = tensor.tensor3('noise')
 
-    z = filtering.apply(inputs=x, batch_size=100, n_steps=n_steps,
+    z = filtering.apply(noise=e, inputs=x,
                         gamma=.1)[1][-1]
     prior = theano.gradient.disconnected_grad(z)
-    cost, codes, recs = filtering.cost(inputs=x, prior=prior)
+    cost, codes, recs = filtering.cost(inputs=x, noise=e, prior=prior)
     cost += 0*y.sum()
 
     cg = ComputationGraph([cost])
@@ -71,8 +77,8 @@ def main(save_to, num_epochs):
                                     iteration_scheme=SequentialScheme(mnist_test.num_examples,
                                                                       100)),
                          _meanize)
-    # trainstream = Mapping(trainstream, _add_enumerator(100, 100), add_sources=('enumerator', ))
-    # teststream = Mapping(teststream, _add_enumerator(100, 100), add_sources=('enumerator', ))
+    trainstream = Mapping(trainstream, _add_noise(n_steps, batch_size, dim, rfunc), add_sources=('noise', ))
+    teststream = Mapping(teststream, _add_noise(n_steps, batch_size, dim, rfunc), add_sources=('noise', ))
 
     algorithm = GradientDescent(
         cost=cost, params=cg.parameters,
