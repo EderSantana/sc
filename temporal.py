@@ -8,8 +8,9 @@ from argparse import ArgumentParser
 from theano import tensor
 from skimage.transform import rotate
 
+from blocks.bricks import MLP, Identity
 from blocks.algorithms import GradientDescent, Adam
-from blocks.initialization import IsotropicGaussian, Constant
+from blocks.initialization import IsotropicGaussian
 from fuel.streams import DataStream
 from fuel.datasets import MNIST
 from fuel.schemes import SequentialScheme
@@ -23,7 +24,7 @@ from blocks.extensions.monitoring import (DataStreamMonitoring,
 from blocks.extensions.plot import Plot
 from blocks.main_loop import MainLoop
 
-from blocks_contrib.bricks.filtering import TemporalSparseFilter, SparseFilter
+from blocks_contrib.bricks.filtering import TemporalVarComp, VarianceComponent, SparseFilter
 from blocks_contrib.extensions import DataStreamMonitoringAndSaving
 floatX = theano.config.floatX
 
@@ -62,16 +63,21 @@ def _meanize(n_steps):
 
 
 def main(save_to, num_epochs):
-    dim = 500
+    dim = 1000
     n_steps = 20
-    proto = SparseFilter(dim=dim, input_dim=784, batch_size=100, n_steps=n_steps)
-    filtering = TemporalSparseFilter(proto=proto, dim=dim, n_steps=n_steps, batch_size=100,
-                                     weights_init=IsotropicGaussian(.01))
+
+    mlp = MLP([Identity()], [dim, 784], use_bias=False)
+    trans = MLP([Identity()], [dim, dim], use_bias=False)
+    mlp2 = MLP([Identity()], [dim, dim], use_bias=False)
+    proto = SparseFilter(mlp=mlp)
+    varcomp = VarianceComponent(mlp=mlp2)
+    filtering = TemporalVarComp(slayer=proto, stransition=trans, clayer=varcomp, batch_size=108, n_steps=n_steps,
+                                weights_init=IsotropicGaussian(.01))
     filtering.initialize()
     x = tensor.tensor3('features')
     y = tensor.lmatrix('targets')
 
-    cost, z, x_hat = filtering.cost(inputs=x, gamma=.1)
+    cost, z, x_hat, u = filtering.cost(inputs=x)
     cost += 0*y.sum()
 
     cg = ComputationGraph([cost])

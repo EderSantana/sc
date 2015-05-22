@@ -7,8 +7,9 @@ from argparse import ArgumentParser
 
 from theano import tensor
 
+from blocks.bricks import MLP, Identity, Tanh
 from blocks.algorithms import GradientDescent, Adam
-from blocks.initialization import IsotropicGaussian, Constant
+from blocks.initialization import IsotropicGaussian
 from fuel.streams import DataStream
 from fuel.datasets import MNIST
 from fuel.schemes import SequentialScheme
@@ -46,9 +47,10 @@ def _meanize(data):
 
 def main(save_to, num_epochs):
     dim = 500
-    n_steps = 20
-    filtering = SparseFilter(dim=dim, input_dim=784, batch_size=100, n_steps=20,
-                             weights_init=IsotropicGaussian(.01), biases_init=Constant(0.))
+    n_steps = 100
+    mlp = MLP([Tanh(), Identity()], [dim, dim, 784], use_bias=False)
+    filtering = SparseFilter(mlp=mlp,
+                             weights_init=IsotropicGaussian(.01))
     filtering.initialize()
     x = tensor.matrix('features')
     y = tensor.lmatrix('targets')
@@ -56,7 +58,7 @@ def main(save_to, num_epochs):
     z = filtering.apply(inputs=x, batch_size=100, n_steps=n_steps,
                         gamma=.1)[1][-1]
     prior = theano.gradient.disconnected_grad(z)
-    cost, codes, recs = filtering.cost(inputs=x, prior=prior)
+    cost, codes, recs = filtering.cost(inputs=x, prior=prior, batch_size=100, n_steps=n_steps)
     cost += 0*y.sum()
 
     cg = ComputationGraph([cost])
